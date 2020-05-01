@@ -33,6 +33,9 @@ import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.dif
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.diff.Hunk;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.diff.Segment;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.markup.MarkdownFormatterFactory;
+import static com.github.mc1arke.sonarqube.plugin.ce.pullrequest.AnalysisDetails.CODE_INSIGHT;
+import static com.github.mc1arke.sonarqube.plugin.ce.pullrequest.AnalysisDetails.DIFF_DECORATION;
+import static com.github.mc1arke.sonarqube.plugin.ce.pullrequest.AnalysisDetails.SUMMARY_DECORATION;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.http.HttpEntity;
@@ -109,26 +112,30 @@ public class BitbucketServerPullRequestDecorator implements PullRequestBuildStat
 
             String insightsStatus = (QualityGate.Status.OK == analysisDetails.getQualityGateStatus() ? "PASS" : "FAIL");
             StringEntity summaryInsightEntity = new StringEntity(new ObjectMapper().writeValueAsString(new Insights("SonarQube Quality Report", insightsStatus)), ContentType.APPLICATION_JSON);
-
-            postComment(commentUrl, headers, summaryCommentEntity);
-            putComment(insightsUrl, headers, summaryInsightEntity);
-
-            DiffPage diffPage = getPage(diffUrl, headers, DiffPage.class);
-            List<PostAnalysisIssueVisitor.ComponentIssue> componentIssues = analysisDetails.getPostAnalysisIssueVisitor().getIssues().stream().filter(i -> OPEN_ISSUE_STATUSES.contains(i.getIssue().status())).collect(Collectors.toList());
-            for (PostAnalysisIssueVisitor.ComponentIssue componentIssue : componentIssues) {
-                final DefaultIssue issue = componentIssue.getIssue();
-                String analysisIssueSummary = analysisDetails.createAnalysisIssueSummary(componentIssue, new MarkdownFormatterFactory());
-                String issuePath = analysisDetails.getSCMPathForIssue(componentIssue).orElse(StringUtils.EMPTY);
-                int issueLine = issue.getLine() != null ? issue.getLine() : 0;
-                String issueType = getIssueType(diffPage, issuePath, issueLine);
-                String fileType = "TO";
-                if (issueType.equals("CONTEXT")) {
-                    fileType = "FROM";
+            if (analysisDetails.getBooleanOption(SUMMARY_DECORATION).orElse(Boolean.TRUE)) {
+                postComment(commentUrl, headers, summaryCommentEntity);
+            }
+            if (analysisDetails.getBooleanOption(CODE_INSIGHT).orElse(Boolean.TRUE)) {
+                putComment(insightsUrl, headers, summaryInsightEntity);
+            }
+            if (analysisDetails.getBooleanOption(DIFF_DECORATION).orElse(Boolean.TRUE)) {
+                DiffPage diffPage = getPage(diffUrl, headers, DiffPage.class);
+                List<PostAnalysisIssueVisitor.ComponentIssue> componentIssues = analysisDetails.getPostAnalysisIssueVisitor().getIssues().stream().filter(i -> OPEN_ISSUE_STATUSES.contains(i.getIssue().status())).collect(Collectors.toList());
+                for (PostAnalysisIssueVisitor.ComponentIssue componentIssue : componentIssues) {
+                    final DefaultIssue issue = componentIssue.getIssue();
+                    String analysisIssueSummary = analysisDetails.createAnalysisIssueSummary(componentIssue, new MarkdownFormatterFactory());
+                    String issuePath = analysisDetails.getSCMPathForIssue(componentIssue).orElse(StringUtils.EMPTY);
+                    int issueLine = issue.getLine() != null ? issue.getLine() : 0;
+                    String issueType = getIssueType(diffPage, issuePath, issueLine);
+                    String fileType = "TO";
+                    if (issueType.equals("CONTEXT")) {
+                        fileType = "FROM";
+                    }
+                    StringEntity fileCommentEntity = new StringEntity(
+                            new ObjectMapper().writeValueAsString(new FileComment(analysisIssueSummary, new Anchor(issueLine, issueType, issuePath, fileType))), ContentType.APPLICATION_JSON
+                    );
+                    postComment(commentUrl, headers, fileCommentEntity);
                 }
-                StringEntity fileCommentEntity = new StringEntity(
-                        new ObjectMapper().writeValueAsString(new FileComment(analysisIssueSummary, new Anchor(issueLine, issueType, issuePath, fileType))), ContentType.APPLICATION_JSON
-                );
-                postComment(commentUrl, headers, fileCommentEntity);
             }
         } catch (IOException ex) {
             throw new IllegalStateException("Could not decorate Pull Request on Bitbucket Server", ex);
