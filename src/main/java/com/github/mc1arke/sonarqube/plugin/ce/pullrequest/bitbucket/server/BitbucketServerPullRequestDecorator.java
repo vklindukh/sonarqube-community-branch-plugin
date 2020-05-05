@@ -33,9 +33,9 @@ import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.dif
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.diff.Hunk;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.diff.Segment;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.markup.MarkdownFormatterFactory;
-import static com.github.mc1arke.sonarqube.plugin.ce.pullrequest.AnalysisDetails.CODE_INSIGHT;
-import static com.github.mc1arke.sonarqube.plugin.ce.pullrequest.AnalysisDetails.DIFF_DECORATION;
-import static com.github.mc1arke.sonarqube.plugin.ce.pullrequest.AnalysisDetails.SUMMARY_DECORATION;
+
+import static com.github.mc1arke.sonarqube.plugin.ce.pullrequest.AnalysisDetails.*;
+import static org.sonar.api.rules.RuleType.CODE_SMELL;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.http.HttpEntity;
@@ -50,6 +50,7 @@ import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 import org.sonar.api.ce.posttask.QualityGate;
 import org.sonar.api.issue.Issue;
+import org.sonar.api.rule.Severity;
 import org.sonar.api.utils.log.Logger;
 import org.sonar.api.utils.log.Loggers;
 import org.sonar.core.issue.DefaultIssue;
@@ -123,18 +124,22 @@ public class BitbucketServerPullRequestDecorator implements PullRequestBuildStat
                 List<PostAnalysisIssueVisitor.ComponentIssue> componentIssues = analysisDetails.getPostAnalysisIssueVisitor().getIssues().stream().filter(i -> OPEN_ISSUE_STATUSES.contains(i.getIssue().status())).collect(Collectors.toList());
                 for (PostAnalysisIssueVisitor.ComponentIssue componentIssue : componentIssues) {
                     final DefaultIssue issue = componentIssue.getIssue();
-                    String analysisIssueSummary = analysisDetails.createAnalysisIssueSummary(componentIssue, new MarkdownFormatterFactory());
-                    String issuePath = analysisDetails.getSCMPathForIssue(componentIssue).orElse(StringUtils.EMPTY);
-                    int issueLine = issue.getLine() != null ? issue.getLine() : 0;
-                    String issueType = getIssueType(diffPage, issuePath, issueLine);
-                    String fileType = "TO";
-                    if (issueType.equals("CONTEXT")) {
-                        fileType = "FROM";
+                    if ((Severity.ALL.indexOf(issue.severity()) >= Severity.ALL.indexOf(analysisDetails.getStringOption(DIFF_DECORATION_SEVERITY).orElse(Severity.INFO))) &&
+                            (issue.type() != CODE_SMELL ) ||
+                                ((issue.type() == CODE_SMELL) && analysisDetails.getBooleanOption(DIFF_DECORATION_CODE_SMELL).orElse(Boolean.TRUE))) {
+                        String analysisIssueSummary = analysisDetails.createAnalysisIssueSummary(componentIssue, new MarkdownFormatterFactory());
+                        String issuePath = analysisDetails.getSCMPathForIssue(componentIssue).orElse(StringUtils.EMPTY);
+                        int issueLine = issue.getLine() != null ? issue.getLine() : 0;
+                        String issueType = getIssueType(diffPage, issuePath, issueLine);
+                        String fileType = "TO";
+                        if (issueType.equals("CONTEXT")) {
+                            fileType = "FROM";
+                        }
+                        StringEntity fileCommentEntity = new StringEntity(
+                                new ObjectMapper().writeValueAsString(new FileComment(analysisIssueSummary, new Anchor(issueLine, issueType, issuePath, fileType))), ContentType.APPLICATION_JSON
+                        );
+                        postComment(commentUrl, headers, fileCommentEntity);
                     }
-                    StringEntity fileCommentEntity = new StringEntity(
-                            new ObjectMapper().writeValueAsString(new FileComment(analysisIssueSummary, new Anchor(issueLine, issueType, issuePath, fileType))), ContentType.APPLICATION_JSON
-                    );
-                    postComment(commentUrl, headers, fileCommentEntity);
                 }
             }
         } catch (IOException ex) {
