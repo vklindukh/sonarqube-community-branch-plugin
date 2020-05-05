@@ -79,6 +79,8 @@ public class AnalysisDetails {
     public static final String IMAGE_URL_BASE = "com.github.mc1arke.sonarqube.plugin.branch.image-url-base";
     public static final String CODE_INSIGHT = "com.github.mc1arke.sonarqube.plugin.branch.code-insights";
     public static final String DIFF_DECORATION = "com.github.mc1arke.sonarqube.plugin.branch.diff-decoration";
+    public static final String DIFF_DECORATION_CODE_SMELL = "com.github.mc1arke.sonarqube.plugin.branch.diff-decoration-code-smell";
+    public static final String DIFF_DECORATION_SEVERITY = "com.github.mc1arke.sonarqube.plugin.branch.diff-decoration-severity";
     public static final String SUMMARY_DECORATION = "com.github.mc1arke.sonarqube.plugin.branch.summary-decoration";
 
     private final String publicRootURL;
@@ -237,6 +239,10 @@ public class AnalysisDetails {
 
     public PostAnalysisIssueVisitor getPostAnalysisIssueVisitor() {
         return postAnalysisIssueVisitor;
+    }
+
+    public Optional<String> getStringOption(String key) {
+        return configuration.get(key);
     }
 
     public Optional<Boolean> getBooleanOption(String key) {
