@@ -23,10 +23,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.AnalysisDetails;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.PostAnalysisIssueVisitor;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.PullRequestBuildStatusDecorator;
-import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.Anchor;
-import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.FileComment;
-import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.Insights;
-import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.SummaryComment;
+import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.*;
+import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.Resource;
+import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.Action;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.diff.Diff;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.diff.DiffLine;
 import com.github.mc1arke.sonarqube.plugin.ce.pullrequest.bitbucket.response.diff.DiffPage;
@@ -57,13 +56,11 @@ import org.sonar.core.issue.DefaultIssue;
 import org.sonar.db.alm.setting.ALM;
 import org.sonar.db.alm.setting.AlmSettingDto;
 import org.sonar.db.alm.setting.ProjectAlmSettingDto;
+import org.sonarqube.ws.Issues;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class BitbucketServerPullRequestDecorator implements PullRequestBuildStatusDecorator {
@@ -82,6 +79,7 @@ public class BitbucketServerPullRequestDecorator implements PullRequestBuildStat
     private static final String FULL_PR_COMMENT_API = "%s" + REST_API + PROJECT_PR_API + COMMENTS_API;
     private static final String FULL_PR_DIFF_API = "%s" + REST_API + PROJECT_PR_API + DIFF_API;
     private static final String FULL_PR_INSIGHTS_API = "%s" + INSIGHTS_API;
+    private static final String FULL_PR_ACTIONS_API = "%s" + REST_API + PROJECT_PR_API + "/activities";
 
     @Override
     public void decorateQualityGateStatus(AnalysisDetails analysisDetails, AlmSettingDto almSettingDto,
@@ -99,6 +97,7 @@ public class BitbucketServerPullRequestDecorator implements PullRequestBuildStat
             String commentUrl = String.format(FULL_PR_COMMENT_API, hostURL, projectKey, repositorySlug, pullRequestId);
             String diffUrl = String.format(FULL_PR_DIFF_API, hostURL, projectKey, repositorySlug, pullRequestId);
             String insightsUrl = String.format(FULL_PR_INSIGHTS_API, hostURL, projectKey, repositorySlug, commitId);
+            String activitiesUrl = String.format(FULL_PR_ACTIONS_API, hostURL, projectKey, repositorySlug, pullRequestId);
 
             LOGGER.debug(String.format("Comment URL is: %s ", commentUrl));
             LOGGER.debug(String.format("Diff URL is: %s ", diffUrl));
@@ -122,6 +121,17 @@ public class BitbucketServerPullRequestDecorator implements PullRequestBuildStat
             if (analysisDetails.getBooleanOption(DIFF_DECORATION).orElse(Boolean.TRUE)) {
                 DiffPage diffPage = getPage(diffUrl, headers, DiffPage.class);
                 List<PostAnalysisIssueVisitor.ComponentIssue> componentIssues = analysisDetails.getPostAnalysisIssueVisitor().getIssues().stream().filter(i -> OPEN_ISSUE_STATUSES.contains(i.getIssue().status())).collect(Collectors.toList());
+
+                List<Action> comments = getComments(activitiesUrl, headers);
+                LOGGER.debug(String.format("Comment Id in PR: %s ", comments
+                        .stream()
+                        .map(Action::getId)
+                        .collect(Collectors.joining(", "))));
+                LOGGER.debug(String.format("Text in PR: %s ", comments
+                        .stream()
+                        .map(Action::getText)
+                        .collect(Collectors.joining("\n"))));
+
                 for (PostAnalysisIssueVisitor.ComponentIssue componentIssue : componentIssues) {
                     final DefaultIssue issue = componentIssue.getIssue();
                     if ((Severity.ALL.indexOf(issue.severity()) >= Severity.ALL.indexOf(analysisDetails.getStringOption(DIFF_DECORATION_SEVERITY).orElse(Severity.INFO))) &&
@@ -138,7 +148,12 @@ public class BitbucketServerPullRequestDecorator implements PullRequestBuildStat
                         StringEntity fileCommentEntity = new StringEntity(
                                 new ObjectMapper().writeValueAsString(new FileComment(analysisIssueSummary, new Anchor(issueLine, issueType, issuePath, fileType))), ContentType.APPLICATION_JSON
                         );
-                        postComment(commentUrl, headers, fileCommentEntity);
+                        if (!commentExists(analysisIssueSummary, issueLine, issuePath, comments)) {
+                            LOGGER.info(String.format("Adding comment for %s:%s", issuePath, issueLine));
+                            postComment(commentUrl, headers, fileCommentEntity);
+                        } else {
+                            LOGGER.info(String.format("Comment for %s:%s already exists", issuePath, issueLine));
+                        }
                     }
                 }
             }
@@ -146,6 +161,23 @@ public class BitbucketServerPullRequestDecorator implements PullRequestBuildStat
             throw new IllegalStateException("Could not decorate Pull Request on Bitbucket Server", ex);
         }
 
+    }
+
+    protected Boolean commentExists(String comment, int issueLine, String issuePath, List<Action> actions) throws IOException {
+        for (Action action : actions) {
+            String newComment = comment.replaceAll("\\(http.*?\\)", "")
+                                        .replaceAll("\\r|\\n", "\\\\n");
+            if (action.getPath().equals(issuePath)
+                && action.getLine() == issueLine) {
+                String oldCommit = action.getText().replaceAll("\\(http.*?\\)", "")
+                                                    .replaceAll("\\r|\\n", "\\\\n");
+                LOGGER.debug(String.format("\nExist text %s\nNew text %s\n%s", oldCommit, newComment, oldCommit.equals(newComment)));
+                if (oldCommit.equals(newComment)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     protected String getIssueType(DiffPage diffPage, String issuePath, int issueLine) {
@@ -208,6 +240,61 @@ public class BitbucketServerPullRequestDecorator implements PullRequestBuildStat
             LOGGER.error(String.format("Could not get %s from Bitbucket Server", type.getName()), ex);
         }
         return type.cast(page);
+    }
+
+    private List<Action> getComments(String commitDiscussionURL, Map<String, String> headers) throws IOException {
+        List<Action> actions = new ArrayList<>();
+        for (Resource page : getPagedList(commitDiscussionURL, headers,0)) {
+            actions.addAll(page.getActivity().stream()
+                    .filter(s -> s.getAction().equals("COMMENTED"))
+                    .collect(Collectors.toList()));
+        }
+        return actions;
+    }
+
+    protected List<Resource> getPagedList(String url, Map<String, String> headers,
+                                            Integer pageStart) throws IOException {
+        if (pageStart > 0) {
+            url = String.format("%s?start=%s", url, pageStart.toString());
+        }
+        HttpGet httpGet = new HttpGet(url);
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            httpGet.addHeader(entry.getKey(), entry.getValue());
+        }
+
+        List<Resource> discussions = new ArrayList<>();
+
+        try (CloseableHttpClient httpClient = HttpClients.createDefault()) {
+            HttpResponse httpResponse = httpClient.execute(httpGet);
+            if (null != httpResponse && httpResponse.getStatusLine().getStatusCode() != 200) {
+                LOGGER.error(httpResponse.toString());
+                LOGGER.error(EntityUtils.toString(httpResponse.getEntity(), StandardCharsets.UTF_8));
+                LOGGER.error("An error was returned in the response from the BitBucket API. See the previous log messages for details");
+            } else if (null != httpResponse) {
+                LOGGER.debug(httpResponse.toString());
+                HttpEntity entity = httpResponse.getEntity();
+                Resource discussion = new ObjectMapper()
+                        .configure(DeserializationFeature.ACCEPT_EMPTY_ARRAY_AS_NULL_OBJECT, true)
+                        .configure(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY, true)
+                        .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+                        .readValue(IOUtils.toString(entity.getContent(), StandardCharsets.UTF_8), Resource.class);
+                discussions.add(discussion);
+                LOGGER.info("Discussion received");
+                Optional<Integer> nextPageStart = getNextUrl(discussion);
+                if (nextPageStart.isPresent()) {
+                    LOGGER.info("Getting next page");
+                    discussions.addAll(getPagedList(url, headers, nextPageStart.get()));
+                }
+            }
+        }
+        return discussions;
+    }
+
+    private <X> Optional<Integer> getNextUrl(Resource discussion) {
+        if (! discussion.isLastPage()) {
+            return Optional.of(discussion.getNextPageStart());
+        }
+        return Optional.empty();
     }
 
     protected boolean postComment(String commentUrl, Map<String, String> headers, StringEntity requestEntity)
